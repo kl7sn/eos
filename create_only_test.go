@@ -153,6 +153,91 @@ func TestPutIfAbsentRejectsUnsupportedProviders(t *testing.T) {
 	}
 }
 
+func TestLocalFilePutIfAbsentRejectsAllWriteEntryPointsWithoutMutation(t *testing.T) {
+	writeEntries := []struct {
+		name string
+		put  func(*LocalFile, string, string, ...PutOptions) error
+	}{
+		{
+			name: "Put",
+			put: func(store *LocalFile, key, body string, options ...PutOptions) error {
+				return store.Put(context.Background(), key, strings.NewReader(body), nil, options...)
+			},
+		},
+		{
+			name: "PutAndCompress",
+			put: func(store *LocalFile, key, body string, options ...PutOptions) error {
+				return store.PutAndCompress(context.Background(), key, strings.NewReader(body), nil, options...)
+			},
+		},
+	}
+
+	for _, entry := range writeEntries {
+		t.Run(entry.name, func(t *testing.T) {
+			store, err := NewLocalFile(t.TempDir())
+			if err != nil {
+				t.Fatalf("NewLocalFile failed: %v", err)
+			}
+
+			err = entry.put(store, "missing", "new-content", PutIfAbsent())
+			if !errors.Is(err, ErrCreateOnlyUnsupported) {
+				t.Fatalf("create-only write error = %v, want ErrCreateOnlyUnsupported", err)
+			}
+			exists, err := store.Exists(context.Background(), "missing")
+			if err != nil {
+				t.Fatalf("Exists failed: %v", err)
+			}
+			if exists {
+				t.Fatal("create-only write created the missing object")
+			}
+
+			if err := store.Put(context.Background(), "existing", strings.NewReader("winner"), nil); err != nil {
+				t.Fatalf("seed Put failed: %v", err)
+			}
+			err = entry.put(store, "existing", "loser", PutIfAbsent())
+			if !errors.Is(err, ErrCreateOnlyUnsupported) {
+				t.Fatalf("create-only overwrite error = %v, want ErrCreateOnlyUnsupported", err)
+			}
+			got, err := store.Get(context.Background(), "existing")
+			if err != nil {
+				t.Fatalf("Get failed: %v", err)
+			}
+			if got != "winner" {
+				t.Fatalf("existing object = %q, want winner", got)
+			}
+		})
+	}
+}
+
+func TestOSSPutIfAbsentRejectsAllWriteEntryPoints(t *testing.T) {
+	store := &OSS{cfg: &BucketConfig{}}
+	writeEntries := []struct {
+		name string
+		put  func(...PutOptions) error
+	}{
+		{
+			name: "Put",
+			put: func(options ...PutOptions) error {
+				return store.Put(context.Background(), "doc", strings.NewReader("content"), nil, options...)
+			},
+		},
+		{
+			name: "PutAndCompress",
+			put: func(options ...PutOptions) error {
+				return store.PutAndCompress(context.Background(), "doc", strings.NewReader("content"), nil, options...)
+			},
+		},
+	}
+
+	for _, entry := range writeEntries {
+		t.Run(entry.name, func(t *testing.T) {
+			if err := entry.put(PutIfAbsent()); !errors.Is(err, ErrCreateOnlyUnsupported) {
+				t.Fatalf("PutIfAbsent error = %v, want ErrCreateOnlyUnsupported", err)
+			}
+		})
+	}
+}
+
 func response(req *http.Request, status int, body string) *http.Response {
 	return &http.Response{
 		StatusCode: status,
