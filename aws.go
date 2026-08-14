@@ -14,6 +14,7 @@ import (
 	"github.com/avast/retry-go"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
+	awsclient "github.com/aws/aws-sdk-go/aws/client"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/golang/snappy"
 )
@@ -272,6 +273,9 @@ func (a *S3) Put(ctx context.Context, key string, reader io.ReadSeeker, meta map
 	for _, opt := range options {
 		opt(putOptions)
 	}
+	if putOptions.ifAbsent && !a.cfg.S3CreateOnlySupported {
+		return ErrCreateOnlyUnsupported
+	}
 	input := &s3.PutObjectInput{
 		Body:        reader,
 		Bucket:      aws.String(bucketName),
@@ -313,6 +317,7 @@ func (a *S3) Put(ctx context.Context, key string, reader io.ReadSeeker, meta map
 		if putOptions.ifAbsent {
 			request, _ := a.client.PutObjectRequest(input)
 			request.SetContext(ctx)
+			request.Retryer = awsclient.NoOpRetryer{}
 			request.HTTPRequest.Header.Set("If-None-Match", "*")
 			err = request.Send()
 			if isPreconditionFailed(err) {

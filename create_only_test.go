@@ -23,6 +23,10 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func newTestS3(t *testing.T, transport http.RoundTripper) *S3 {
+	return newTestS3WithMaxRetries(t, transport, aws.Int(0))
+}
+
+func newTestS3WithMaxRetries(t *testing.T, transport http.RoundTripper, maxRetries *int) *S3 {
 	t.Helper()
 	httpClient := &http.Client{Transport: transport}
 	awsClient := s3.New(session.Must(session.NewSession(&aws.Config{
@@ -31,9 +35,9 @@ func newTestS3(t *testing.T, transport http.RoundTripper) *S3 {
 		Region:           aws.String("us-east-1"),
 		S3ForcePathStyle: aws.Bool(true),
 		HTTPClient:       httpClient,
-		MaxRetries:       aws.Int(0),
+		MaxRetries:       maxRetries,
 	})))
-	return &S3{BucketName: "bucket", client: awsClient, cfg: &BucketConfig{}}
+	return &S3{BucketName: "bucket", client: awsClient, cfg: &BucketConfig{S3CreateOnlySupported: true}}
 }
 
 func TestS3PutIfAbsentSendsSignedConditionalHeader(t *testing.T) {
@@ -93,6 +97,40 @@ func TestS3PutIfAbsentMapsPreconditionFailureWithoutRetry(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("request calls = %d, want 1", got)
+	}
+}
+
+func TestS3PutIfAbsentDisablesSDKRetriesOnServerError(t *testing.T) {
+	var calls int32
+	store := newTestS3WithMaxRetries(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return response(req, http.StatusInternalServerError,
+			`<Error><Code>InternalError</Code><Message>response may be lost</Message></Error>`), nil
+	}), nil)
+
+	err := store.Put(context.Background(), "doc", strings.NewReader("winner"), nil, PutIfAbsent())
+	if err == nil {
+		t.Fatal("PutIfAbsent error = nil, want server error")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("request calls = %d, want 1", got)
+	}
+}
+
+func TestS3PutIfAbsentFailsClosedWithoutVerifiedBackendCapability(t *testing.T) {
+	var calls int32
+	store := newTestS3(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return response(req, http.StatusOK, ""), nil
+	}))
+	store.cfg = &BucketConfig{}
+
+	err := store.Put(context.Background(), "doc", strings.NewReader("winner"), nil, PutIfAbsent())
+	if !errors.Is(err, ErrCreateOnlyUnsupported) {
+		t.Fatalf("PutIfAbsent error = %v, want ErrCreateOnlyUnsupported", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Fatalf("request calls = %d, want 0", got)
 	}
 }
 
